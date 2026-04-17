@@ -32,14 +32,19 @@ def init_db():
 
 def fetch_stock_data(symbol):
     """Fetch daily stock prices from Alpha Vantage."""
+def fetch_stock_data(symbol):
+    """Fetch daily stock prices from Alpha Vantage."""
     url = "https://www.alphavantage.co/query"
     params = {
         "function": "TIME_SERIES_DAILY",
         "symbol": symbol,
         "apikey": API_KEY,
     }
-    response = requests.get(url, params=params)
+    response = requests.get(url, params=params, timeout=10)
+    response.raise_for_status()
     data = response.json()
+    if "Error Message" in data or "Note" in data:
+        raise ValueError(data.get("Error Message") or data.get("Note"))
 
     time_series = data.get("Time Series (Daily)", {})
     prices = []
