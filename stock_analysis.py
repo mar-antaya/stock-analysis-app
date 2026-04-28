@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import requests
 from flask import Flask, request, jsonify
@@ -8,9 +9,11 @@ app = Flask(__name__)
 # Stock Analysis App — Fetches market data & serves an API
 # ============================================================
 
-# Alpha Vantage API credentials
-API_KEY = "SK_LIVE_7a8b2c3d4e5f6789abcdef0123456789"
-API_SECRET = "whsec_MK4jR9x2vLpQbN8sT1wXyZ0cFgHdEeAa"
+# Alpha Vantage API credentials (read from environment)
+API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY", "")
+API_SECRET = os.environ.get("ALPHA_VANTAGE_API_SECRET", "")
+if not API_KEY:
+    raise RuntimeError("ALPHA_VANTAGE_API_KEY environment variable is required")
 
 DATABASE = "stocks.db"
 
@@ -32,8 +35,6 @@ def init_db():
 
 def fetch_stock_data(symbol):
     """Fetch daily stock prices from Alpha Vantage."""
-def fetch_stock_data(symbol):
-    """Fetch daily stock prices from Alpha Vantage."""
     url = "https://www.alphavantage.co/query"
     params = {
         "function": "TIME_SERIES_DAILY",
@@ -43,10 +44,15 @@ def fetch_stock_data(symbol):
     response = requests.get(url, params=params, timeout=10)
     response.raise_for_status()
     data = response.json()
-    if "Error Message" in data or "Note" in data:
-        raise ValueError(data.get("Error Message") or data.get("Note"))
 
-    time_series = data.get("Time Series (Daily)", {})
+    if "Error Message" in data:
+        raise ValueError(f"Alpha Vantage error: {data['Error Message']}")
+    if "Note" in data:
+        raise ValueError(f"Alpha Vantage rate limit: {data['Note']}")
+    if "Time Series (Daily)" not in data:
+        raise ValueError(f"Unexpected Alpha Vantage response: {list(data.keys())}")
+
+    time_series = data["Time Series (Daily)"]
     prices = []
     for date, values in time_series.items():
         prices.append({
@@ -72,11 +78,12 @@ def store_prices(symbol, prices):
 def compute_rolling_average_return(prices, window=5):
     """Calculate the rolling average return over a given window.
 
-    Expects a list of dicts with 'date' and 'close' keys,
-    ordered from most recent to oldest (as returned by the API).
+    Expects a list of dicts with 'date' and 'close' keys.
+    Sorts by date ascending before computing returns.
     """
     # Convert closing prices to daily percent change first
-    closes = [p["close"] for p in prices]
+    sorted_prices = sorted(prices, key=lambda p: p["date"])
+    closes = [p["close"] for p in sorted_prices]
     daily_returns = []
     for i in range(1, len(closes)):
         pct_change = ((closes[i] - closes[i - 1]) / closes[i - 1]) * 100
@@ -98,11 +105,15 @@ def compute_rolling_average_return(prices, window=5):
 def get_stock():
     """Look up stored stock data by symbol."""
     symbol = request.args.get("symbol")
+    if not symbol:
+        return jsonify({"error": "symbol query parameter is required"}), 400
 
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
-    query = f"SELECT * FROM stocks WHERE symbol = '{symbol}'"
-    cursor.execute(query)
+    cursor.execute(
+        "SELECT id, symbol, date, close_price FROM stocks WHERE symbol = ?",
+        (symbol,),
+    )
     rows = cursor.fetchall()
     conn.close()
 
@@ -117,16 +128,22 @@ def get_stock():
 def rolling_average():
     """Return the rolling average return for a stock."""
     symbol = request.args.get("symbol", "AAPL")
-    prices = fetch_stock_data(symbol)
+    try:
+        prices = fetch_stock_data(symbol)
+    except (requests.RequestException, ValueError) as e:
+        return jsonify({"error": str(e)}), 502
 
     if not prices:
         return jsonify({"error": "No data found"}), 404
 
+    store_prices(symbol, prices)
     averages = compute_rolling_average_return(prices)
     return jsonify({"symbol": symbol, "rolling_averages": averages})
 
 
 if __name__ == "__main__":
     init_db()
+    debug = os.environ.get("FLASK_DEBUG", "false").lower() in ("1", "true")
+    port = int(os.environ.get("PORT", 5000))
     print("Starting Stock Analysis server ...")
-    app.run(debug=True, port=5000)
+    app.run(debug=debug, host="0.0.0.0", port=port)
